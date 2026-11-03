@@ -2,5 +2,5 @@
 
 ```sh
 uv sync --frozen --extra aldp
-uv run --frozen --extra aldp jupyter lab notebooks/Milestone_1_Implementation.ipynb
+uv run --frozen --extra aldp jupyter lab impl.ipynb
 ```
