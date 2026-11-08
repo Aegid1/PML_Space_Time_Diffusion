@@ -26,8 +26,8 @@ if __name__ == "__main__":
     #############################################
     # potential and force
     #############################################
-
-    # compare_force_with_autograd(grid_to_points(X, Y))
+    compare_force_with_autograd(grid_to_points(X, Y), dtype=torch.float32)
+    compare_force_with_autograd(grid_to_points(X, Y), dtype=torch.float64)
     # visualize_mueller_brown_potential(X, Y)
     # visualize_boltzmann_density(X, Y, kT=config.kT)
 
@@ -40,12 +40,12 @@ if __name__ == "__main__":
     # start_velocity = torch.randn(1,2)
     # samples = langevin_integrator(start_point, start_velocity, mueller_brown_force, config)
     # save_trajectory(TRAJECTORY_PATH, samples, config, start_point, start_velocity)
-    samples, config, start_point, start_velocity = load_trajectory(TRAJECTORY_PATH)
-    torch.manual_seed(config.seed)
-    equilibrium_samples = samples[BURN_IN:]
+    # samples, config, start_point, start_velocity = load_trajectory(TRAJECTORY_PATH)
+    # torch.manual_seed(config.seed)
+    # equilibrium_samples = samples[BURN_IN:]
 
 
-    visualize_samples_density(equilibrium_samples, samples[0].detach(), X, Y, config, start_velocity, bins=100, x_range=x_range, y_range=y_range)
+    # visualize_samples_density(equilibrium_samples, samples[0].detach(), X, Y, config, start_velocity, bins=100, x_range=x_range, y_range=y_range)
 
     # comparison with the Boltzmann distribution
     # compare_to_boltzmann(equilibrium_samples, kT=config.kT, bins=50, x_range=x_range, y_range=y_range)

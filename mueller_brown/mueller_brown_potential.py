@@ -92,27 +92,32 @@ def mueller_brown_force(x):
     return torch.stack((F_x, F_y), dim=1)
 
 
-def compare_force_with_autograd(x):
+def compare_force_with_autograd(x, dtype=torch.float32):
     """
-    Compares the analytic force with the negative gradient of the potential obtained via torch.autograd.
+    Compares the analytic force with the negative gradient of the potential obtained via torch.autograd,
+    with all computations performed in the given floating point precision.
+
 
     Parameters
     ----------
     x : torch.tensor
         tensor of shape (N, 2) with the test points
+    dtype : torch.dtype
+        floating point precision of the comparison, e.g. torch.float32 or torch.float64
 
     Returns
     -------
     tuple of float
         maximum and mean absolute deviation over all points and components
     """
+    x = x.detach().to(dtype)
     analytic_force = mueller_brown_force(x)
 
-    x_grad = x.detach().clone().requires_grad_(True)   # do not modify the input tensor
+    x_grad = x.clone().requires_grad_(True)
     mueller_brown_potential(x_grad).sum().backward()
     autograd_force = -x_grad.grad
 
     deviation = (analytic_force - autograd_force).abs()
     max_error, avg_error = deviation.max().item(), deviation.mean().item()
-    print(f"max absolute difference: {max_error:.3e} | avg absolute difference: {avg_error:.3e}")
+    print(f"{str(dtype):>13} | max absolute difference: {max_error:.3e} | avg absolute difference: {avg_error:.3e}")
     return max_error, avg_error
