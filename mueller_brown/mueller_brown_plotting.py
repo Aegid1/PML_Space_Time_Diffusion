@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from matplotlib.colors import LogNorm
-
+from model.VP import VP
 from mueller_brown_analysis import (evaluate_on_grid, noised_energy_landscape, vp_coefficients, boltzmann_probabilities,
                                     grid_to_points, noise_samples)
 from mueller_brown_potential import mueller_brown_potential, MB_MINIMA, MB_SADDLES, MB_STATE_NAMES
@@ -35,7 +35,7 @@ def add_stationary_points(ax, minima=MB_MINIMA, saddles=MB_SADDLES):
 
 
 #############################################
-# potential and Boltzmann density
+# Mueller-Brown potential and Boltzmann density
 #############################################
 
 def visualize_mueller_brown_potential(X, Y, n_contour_levels=15, u_max=100.0):
@@ -185,7 +185,7 @@ def visualize_running_state_fractions(states, fractions, dt, expected_state_frac
 # noised energy landscapes
 #############################################
 
-def visualize_noised_energy_landscapes(samples, X, Y, vp, timesteps, seed, bins=80, x_range=(-1.5, 1.2), y_range=(-0.5, 2.0)):
+def visualize_noised_energy_landscapes_md(samples, X, Y, vp, timesteps, seed, bins=80, x_range=(-1.5, 1.2), y_range=(-0.5, 2.0)):
     """
     Visualizes the energy landscapes of the noised Langevin samples for several diffusion times.
 
@@ -214,16 +214,23 @@ def visualize_noised_energy_landscapes(samples, X, Y, vp, timesteps, seed, bins=
     alphas, sigmas = vp_coefficients(vp, timesteps)
     generator = torch.Generator().manual_seed(seed)
 
-    n_cols = 4
+    n_cols = 3
     n_rows = int(np.ceil(len(timesteps) / n_cols))
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3.5 * n_rows), sharex=True, sharey=True)
     axes = np.atleast_1d(axes).ravel()
 
     for ax, t, alpha, sigma in zip(axes, timesteps.tolist(), alphas.tolist(), sigmas.tolist()):
         xt = noise_samples(samples.detach(), alpha, sigma, generator).numpy()
-        *_, img = ax.hist2d(xt[:, 0], xt[:, 1], bins=bins, range=[x_range, y_range], density=True, norm=LogNorm(), cmap="turbo_r", rasterized=True)
+
+        # density of the noised samples -> energy U_t = -log p_t,
+        density, x_edges, y_edges = np.histogram2d(xt[:, 0], xt[:, 1], bins=bins, range=[x_range, y_range],density=True)
+        with np.errstate(divide="ignore"):
+            energy = -np.log(density)  # empty bins -> inf
+        energy = energy - energy[np.isfinite(energy)].min() # minimum shifted to 0
+        energy[~np.isfinite(energy)] = np.nan  # empty bins stay white
+        img = ax.pcolormesh(x_edges, y_edges, energy.T, vmin=0, cmap="turbo", rasterized=True)
+
         add_potential_contours(ax, X, Y, levels=15)
-        fig.colorbar(img, ax=ax, label=r"$p_t$ (log scale)", shrink=0.85)
 
         ax.set_title(rf"$t = {t:g}$ | $\sigma_t = {sigma:.2f}$ | $\alpha_t = {alpha:.3f}$", fontsize=10)
         ax.set_aspect("equal")
@@ -236,4 +243,106 @@ def visualize_noised_energy_landscapes(samples, X, Y, vp, timesteps, seed, bins=
         ax.set_xlabel(r"$x$")
 
     plt.tight_layout()
+    fig.colorbar(img, ax=axes[:len(timesteps)].tolist(), label=r"relative energy [$k_BT$]", shrink=0.85, extend="max")
     plt.show()
+
+
+def visualize_learned_energy_landscapes(model, X, Y, vp, timesteps, n_cols=3):
+    """
+    Visualizes the noised energy landscapes E_theta(x, t) learned by the diffusion model for several
+    diffusion times.
+    All energies are given in units of k_B T and shifted such that their minimum on the grid is 0, so that
+    all panels share one color scale. The contour lines of the original potential are shown as reference.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        trained diffusion model providing energy(x, t)
+    X, Y : torch.tensor
+        meshgrid tensors on which the energies are evaluated
+    vp : VP
+        variance preserving SDE providing log_mean_coeff(t) and std(t)
+    timesteps : torch.tensor
+        diffusion times t in [0, 1]
+    n_cols : int
+        number of panels per row
+    """
+    alphas, sigmas = vp_coefficients(vp, timesteps)
+    points = grid_to_points(X, Y)
+
+    # analytic energy at t = 0 as reference, then the learned energies for all diffusion times
+    with torch.no_grad():
+        energies = []
+        for t in timesteps.tolist():
+            times = torch.full((len(points), 1), t)
+            energies.append(model.energy(points, times).reshape(-1))
+    titles = [rf"$t = {t:g}$ | $\sigma_t = {s:.2f}$ | $\alpha_t = {a:.3f}$" for t, s, a in zip(timesteps.tolist(), sigmas.tolist(), alphas.tolist())]
+
+    n_panels = len(energies)
+    n_rows = int(np.ceil(n_panels / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3.5 * n_rows), sharex=True, sharey=True)
+    axes = np.atleast_1d(axes).ravel()
+
+    for ax, energy, title in zip(axes, energies, titles):
+        energy = (energy - energy.min()).reshape(X.shape)          # minimum of each panel at 0
+        img = ax.contourf(X.numpy(), Y.numpy(), energy.numpy(), levels=15, extend="max", cmap="turbo")
+        add_potential_contours(ax, X, Y, levels=15)
+
+        ax.set_title(title, fontsize=10)
+        ax.set_aspect("equal")
+
+    for ax in axes[n_panels:]:  # hide unused panels
+        ax.set_visible(False)
+    for ax in axes[::n_cols]:
+        ax.set_ylabel(r"$y$")
+    for ax in axes[(n_rows - 1) * n_cols:]:
+        ax.set_xlabel(r"$x$")
+
+    plt.tight_layout()
+    fig.colorbar(img, ax=axes[:n_panels].tolist(), label=r"relative energy [$k_BT$]", shrink=0.85)
+    plt.show()
+
+
+def visualize_generated_samples_density(model, X, Y, num_samples=50_000, num_steps=200, bins=100, x_range=(-1.5, 1.2), y_range=(-0.5, 2.0), save_path=None):
+    """
+    Generates samples with the trained diffusion model and visualizes their density as 2D histogram on a
+    logarithmic color scale, with the contour lines of the Mueller-Brown potential as reference. Bins without samples stay white.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        trained diffusion model providing the function sample()
+    X, Y : torch.tensor
+        meshgrid tensors for the contour lines of the original potential
+    num_samples : int
+        number of generated samples
+    num_steps : int
+        number of steps of the sampler
+    bins : int
+        number of histogram bins per axis
+    x_range, y_range : tuple
+        histogram and plotting range
+    save_path : str or Path, optional
+        if given, the generated samples are saved to this path as .npy file
+
+    Returns
+    -------
+    torch.tensor
+        generated samples of shape (num_samples, 2)
+    """
+    generated = model.sample(model, num_samples=num_samples, num_steps=num_steps).detach()
+    if save_path is not None:
+        np.save(save_path, generated.numpy())
+
+    data = generated.numpy()
+    fig, ax = plt.subplots(figsize=(6, 5))
+    *_, img = ax.hist2d(data[:, 0], data[:, 1], bins=bins, range=[x_range, y_range], density=True, norm=LogNorm(), cmap="turbo_r", rasterized=True)
+    fig.colorbar(img, ax=ax, label="density (log scale)", shrink=0.8)
+    add_potential_contours(ax, X, Y, levels=15)
+
+    ax.set_xlabel(r"$x$")
+    ax.set_ylabel(r"$y$")
+    ax.set_aspect("equal")
+    plt.tight_layout()
+    plt.show()
+    return generated

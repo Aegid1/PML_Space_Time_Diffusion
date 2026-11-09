@@ -7,6 +7,10 @@ Langevin dynamics" (2013).
 import math
 import os
 from dataclasses import dataclass, asdict
+from pathlib import Path
+
+import h5py
+import numpy as np
 import torch
 
 
@@ -77,16 +81,21 @@ def langevin_integrator(x0, v0, force_fn, config):
     return samples
 
 
-def save_trajectory(path, positions, config, x0, v0):
-    """Saves the positions of a trajectory together with all simulation parameters."""
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
+def save_trajectory(path, positions, config, x0, v0, burn_in=0):
+    """
+        Saves the positions of a trajectory as HDF5 file of shape (n_samples, 2). The first burn_in steps are discarded.
+        The simulation parameters are stored as attributes of the file.
+        """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    torch.save({
-        "positions": positions,   # shape=[n_steps + 1, 2]
-        "params": {**asdict(config), "x0": x0.tolist(), "v0": v0.tolist()},
-    }, path)
+    with h5py.File(path, "w") as file:
+        file.create_dataset("coordinates", data=positions[burn_in:].detach().numpy().astype(np.float32))
+        for key, value in asdict(config).items():
+            file.attrs[key] = value
+        file.attrs["x0"] = x0.detach().numpy().reshape(-1)
+        file.attrs["v0"] = v0.detach().numpy().reshape(-1)
+        file.attrs["burn_in"] = burn_in
 
 
 def load_trajectory(path):
@@ -96,13 +105,20 @@ def load_trajectory(path):
     Returns
     -------
     positions : torch.tensor
-        positions of shape (n_steps + 1, 2)
+        positions of shape (n_samples, 2), burn-in already removed
     config : LangevinConfig
         simulation parameters
     x0, v0 : torch.tensor
-        start position and start velocity
+        start position and start velocity of shape (1, 2)
+    burn_in : int
+        number of discarded initial steps
     """
-    data = torch.load(path)
-    params = dict(data["params"])
-    x0, v0 = torch.tensor(params.pop("x0")), torch.tensor(params.pop("v0"))
-    return data["positions"], LangevinConfig(**params), x0, v0
+    with h5py.File(path, "r") as file:
+        positions = torch.from_numpy(file["coordinates"][:])
+        attrs = dict(file.attrs)
+
+    x0 = torch.from_numpy(attrs.pop("x0")).reshape(1, 2)
+    v0 = torch.from_numpy(attrs.pop("v0")).reshape(1, 2)
+    burn_in = int(attrs.pop("burn_in"))
+    config = LangevinConfig(**{key: value.item() for key, value in attrs.items()})   # numpy -> python types
+    return positions, config, x0, v0, burn_in
