@@ -34,9 +34,9 @@ class Model(nn.Module):
 
 
     @torch.no_grad()
-    def sample(self, model, num_samples, num_steps, seed=42, eps=1e-5):
-        # TODO set seed
-        model.eval()
+    def sample(self, num_samples, num_steps, seed=42, eps=1e-5):
+        torch.manual_seed(seed)
+        self.eval()
         vp = VP()
         ts = torch.linspace(1, eps, num_steps + 1)
         x = torch.randn(num_samples, 2)
@@ -46,7 +46,7 @@ class Model(nn.Module):
             dt = ts[i] - ts[i + 1]
             # enable gradient computation to compute the energy
             with torch.enable_grad():
-                score = model(x, t, create_graph=False)
+                score = self.forward(x, t, create_graph=False)
             drift, diffusion = vp.reverse_sde(x, t, score)
             x_mean = x + drift * dt
             x = x_mean + diffusion[:, None] * torch.sqrt(dt) * torch.randn_like(x)

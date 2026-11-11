@@ -4,12 +4,14 @@ checks and noised energy landscapes.
 """
 import os
 import torch
-from mueller_brown_analysis import make_grid, grid_to_points, compare_to_boltzmann, assign_states, running_state_fractions, boltzmann_state_fractions
+from mueller_brown_analysis import make_grid, grid_to_points, compare_to_boltzmann_tv_kl, assign_states, \
+    running_state_fractions, boltzmann_state_fractions, free_energy_difference, free_energy_difference_mae_per_state
 from langevin import LangevinConfig, langevin_integrator, save_trajectory, load_trajectory
 from mueller_brown_plotting import (visualize_mueller_brown_potential, visualize_boltzmann_density,
                                     visualize_samples_density, visualize_running_state_fractions,
                                     visualize_noised_energy_landscapes_md, visualize_generated_samples_density,
-                                    visualize_learned_energy_landscapes)
+                                    visualize_learned_energy_landscapes, visualize_free_energy_difference,
+                                    visualize_free_energy_difference_per_state)
 from mueller_brown_potential import mueller_brown_force, compare_force_with_autograd, MB_MINIMA
 from model.VP import VP
 from model.Model import Model
@@ -45,14 +47,14 @@ if __name__ == "__main__":
     # start_velocity = torch.randn(1,2)
     # samples = langevin_integrator(start_point, start_velocity, mueller_brown_force, config)
     # save_trajectory(TRAJECTORY_PATH, samples, config, start_point, start_velocity, burn_in=BURN_IN)
-    samples, config, start_point, start_velocity, burn_in = load_trajectory(TRAJECTORY_PATH)
-    torch.manual_seed(config.seed)
+    # samples, config, start_point, start_velocity, burn_in = load_trajectory(TRAJECTORY_PATH)
+    # torch.manual_seed(config.seed)
 
 
     # visualize_samples_density(samples, samples[0].detach(), X, Y, config, start_velocity, bins=100, x_range=x_range, y_range=y_range)
 
     # comparison with the Boltzmann distribution
-    # compare_to_boltzmann(samples, kT=config.kT, bins=50, x_range=x_range, y_range=y_range)
+    # compare_to_boltzmann_tv_kl(samples, kT=config.kT, bins=100, x_range=x_range, y_range=y_range)
 
     # convergence: running state fractions vs. Boltzmann state fractions
     # states = assign_states(samples, MB_MINIMA)
@@ -62,16 +64,29 @@ if __name__ == "__main__":
 
 
     # noised energy landscapes from molecular dynamics
-    timesteps = torch.tensor([0.0, 0.03, 0.1, 0.17, 0.3, 1.0])
-    visualize_noised_energy_landscapes_md(samples, X, Y, vp, timesteps, seed=config.seed, x_range=x_range, y_range=y_range)
+    # timesteps = torch.tensor([0.0, 0.03, 0.1, 0.17, 0.3, 1.0])
+    # visualize_noised_energy_landscapes_md(samples, X, Y, vp, timesteps, seed=config.seed, x_range=x_range, y_range=y_range)
 
     #############################################
     # learned model
     #############################################
     model = Model(dim=2, hidden_dim=92, n_layers=3)
     model.load_state_dict(torch.load(os.path.join("data", "mueller_brown", "model.pt")))
-    X, Y = make_grid((-1.8, 1.1), (-0.5, 2.0), n=150)
-    # generated = visualize_generated_samples_density(model, X, Y, num_samples=50_000, num_steps=200)
+    generated = visualize_generated_samples_density(model, X, Y, num_samples=490_001, num_steps=200)
+    # compare_to_boltzmann_tv_kl(generated, kT=config.kT, bins=100, x_range=x_range, y_range=y_range)
 
-    timesteps = torch.tensor([0.0, 0.03, 0.1, 0.17, 0.3, 1.0])
-    visualize_learned_energy_landscapes(model, X, Y, vp, timesteps)
+    # visualize learned energy landscape across multiple noise levels
+    # timesteps = torch.tensor([0.0, 0.03, 0.1, 0.17, 0.3, 1.0])
+    # visualize_learned_energy_landscapes(model, X, Y, vp, timesteps)
+
+    # compare learned model based on free energy profiles
+    difference, F_true, X, Y, relevant_bins = free_energy_difference(generated, kT=config.kT, bins=100, x_range=x_range, y_range=y_range)
+    visualize_free_energy_difference(difference, X=X, Y=Y)
+
+    compared = ~torch.isnan(difference) # take only bins that contain no nan-values
+    mae = difference[compared].abs().mean().item()
+    print(f"mean average total free energy difference between generated samples and true energies: {mae:.3}")
+
+    # plot the free energy profiles per metastable state
+    results = free_energy_difference_mae_per_state(difference, X, Y)
+    visualize_free_energy_difference_per_state(difference, X, Y, results)

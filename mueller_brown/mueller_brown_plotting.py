@@ -4,10 +4,10 @@ Visualizations for the Mueller-Brown system. Torch tensors are converted to nump
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LogNorm, ListedColormap
 from model.VP import VP
 from mueller_brown_analysis import (evaluate_on_grid, noised_energy_landscape, vp_coefficients, boltzmann_probabilities,
-                                    grid_to_points, noise_samples)
+                                    grid_to_points, noise_samples, assign_states)
 from mueller_brown_potential import mueller_brown_potential, MB_MINIMA, MB_SADDLES, MB_STATE_NAMES
 
 
@@ -82,8 +82,6 @@ def visualize_boltzmann_density(X, Y, kT, n_contour_levels=15):
     n_contour_levels : int
         number of contour levels
     """
-    # cell_area = ((X[1, 0] - X[0, 0]) * (Y[0, 1] - Y[0, 0])).item()
-    # density = boltzmann_probabilities(grid_to_points(X, Y), kT).reshape(X.shape) / cell_area
 
     points = grid_to_points(X, Y)
     density = boltzmann_probabilities(points, kT).reshape(X.shape)
@@ -106,7 +104,7 @@ def visualize_boltzmann_density(X, Y, kT, n_contour_levels=15):
 #############################################
 
 
-def visualize_samples_density(samples, start_point, X, Y, config, v0, bins=100, x_range=(-1.5, 1.2), y_range=(-0.5, 2.0), n_contour_levels=15):
+def visualize_samples_density(samples, start_point, X, Y, config, v0, bins=100, x_range=(-1.5, 1.5), y_range=(-0.5, 2.0), n_contour_levels=15):
     """
     Visualizes the density of the positions of a Langevin trajectory as 2D histogram, with the contour lines of the
     Mueller-Brown potential as reference and the start point marked.
@@ -185,7 +183,7 @@ def visualize_running_state_fractions(states, fractions, dt, expected_state_frac
 # noised energy landscapes
 #############################################
 
-def visualize_noised_energy_landscapes_md(samples, X, Y, vp, timesteps, seed, bins=80, x_range=(-1.5, 1.2), y_range=(-0.5, 2.0)):
+def visualize_noised_energy_landscapes_md(samples, X, Y, vp, timesteps, seed, bins=80, x_range=(-1.5, 1.5), y_range=(-0.5, 2.0)):
     """
     Visualizes the energy landscapes of the noised Langevin samples for several diffusion times.
 
@@ -303,7 +301,7 @@ def visualize_learned_energy_landscapes(model, X, Y, vp, timesteps, n_cols=3):
     plt.show()
 
 
-def visualize_generated_samples_density(model, X, Y, num_samples=50_000, num_steps=200, bins=100, x_range=(-1.5, 1.2), y_range=(-0.5, 2.0), save_path=None):
+def visualize_generated_samples_density(model, X, Y, num_samples=50_000, num_steps=200, bins=100, x_range=(-1.5, 1.5), y_range=(-0.5, 2.0), save_path=None):
     """
     Generates samples with the trained diffusion model and visualizes their density as 2D histogram on a
     logarithmic color scale, with the contour lines of the Mueller-Brown potential as reference. Bins without samples stay white.
@@ -330,19 +328,94 @@ def visualize_generated_samples_density(model, X, Y, num_samples=50_000, num_ste
     torch.tensor
         generated samples of shape (num_samples, 2)
     """
-    generated = model.sample(model, num_samples=num_samples, num_steps=num_steps).detach()
+    generated = model.sample(num_samples=num_samples, num_steps=num_steps).detach()
     if save_path is not None:
         np.save(save_path, generated.numpy())
 
     data = generated.numpy()
-    fig, ax = plt.subplots(figsize=(6, 5))
+    fig, ax = plt.subplots(figsize=(7, 6))
     *_, img = ax.hist2d(data[:, 0], data[:, 1], bins=bins, range=[x_range, y_range], density=True, norm=LogNorm(), cmap="turbo_r", rasterized=True)
-    fig.colorbar(img, ax=ax, label="density (log scale)", shrink=0.8)
+    fig.colorbar(img, ax=ax, label="density (log scale)")
     add_potential_contours(ax, X, Y, levels=15)
 
+    ax.set_xlabel(r"$x$")
+    ax.set_ylabel(r"$y$")
+    ax.set_title(f"Density of generated samples of the diffusion model (N = {num_samples:,})")
+    plt.tight_layout()
+    plt.show()
+    return generated
+
+
+#############################################
+# free energy comparisons
+#############################################
+
+def visualize_free_energy_difference(difference, X, Y):
+    """
+    Plots the difference of two free energy profiles on the grid.
+    Red: free energy too high (too few samples),
+    blue: too low (too many samples)
+    white: bins that are not compared
+    """
+    limit = np.nanmax(np.abs(difference.numpy())) # nanmax returns the max value with ignoring NaNs
+
+    fig, ax = plt.subplots(figsize=(7, 6))
+    img = ax.pcolormesh(X.numpy(), Y.numpy(), difference.numpy(), cmap="RdBu_r", vmin=-limit, vmax=limit, shading="nearest")
+    fig.colorbar(img, ax=ax, label=r"$F_\mathrm{samples} - F_\mathrm{true}$ [$k_BT$]", shrink=0.8)
+
+    ax.set_title("free energy profiles")
     ax.set_xlabel(r"$x$")
     ax.set_ylabel(r"$y$")
     ax.set_aspect("equal")
     plt.tight_layout()
     plt.show()
-    return generated
+
+
+def visualize_free_energy_difference_per_state(difference, X, Y, results, minima=MB_MINIMA, names=MB_STATE_NAMES):
+    """
+    Plots the difference of two free energy profiles separately for each metastable state, in one row of
+    subplots. In each subplot, the bins assigned to the state (nearest minimum) are colored by the difference,
+    all other compared bins are shown in gray, and bins without samples stay white. The title shows the mean
+    absolute difference of the state.
+
+    Parameters
+    ----------
+    difference : torch.tensor
+        difference of the free energy profiles of shape X.shape, nan outside the compared bins
+    X, Y : torch.tensor
+        meshgrid tensors (indexing="ij") of the bin centers
+    results : dict
+        output of free_energy_mae_per_state, containing the mae for each state
+    minima : torch.tensor
+        positions of the minima of shape (n_states, 2)
+    names : list of str
+        names of the states, same order as minima
+    """
+    limit = np.nanmax(np.abs(difference.numpy())) # nanmax returns the max value with ignoring NaNs
+
+    states = assign_states(grid_to_points(X, Y), minima).reshape(X.shape).numpy()
+    diff = difference.numpy()
+    compared = ~np.isnan(diff)
+    X_np, Y_np = X.numpy(), Y.numpy()
+    gray = ListedColormap(["lightgray"])
+
+    fig, axes = plt.subplots(1, len(names), figsize=(4.5 * len(names), 4.2))
+    for k, (ax, name) in enumerate(zip(axes, names)):
+        # define relevant and gray area of the subplot
+        in_state = compared & (states == k)
+        other = compared & (states != k)
+
+        # compared bins of the other states in gray, bins of this state colored by the difference
+        ax.pcolormesh(X_np, Y_np, np.where(other, 1.0, np.nan), cmap=gray, shading="nearest")
+        img = ax.pcolormesh(X_np, Y_np, np.where(in_state, diff, np.nan), cmap="RdBu_r", vmin=-limit, vmax=limit, shading="nearest")
+        ax.scatter(minima[k, 0], minima[k, 1], marker="x", color="black", s=50, zorder=5) # plot the minima as an x
+
+        mae = results[name]
+        ax.set_title(f"{name}\nMAE = {mae:.2f} $k_BT$", fontsize=10)
+        ax.set_xlabel(r"$x$")
+        ax.set_aspect("equal")
+
+    axes[0].set_ylabel(r"$y$")
+    plt.tight_layout()
+    fig.colorbar(img, ax=axes.tolist(), label=r"$F_\mathrm{samples} - F_\mathrm{true}$ [$k_BT$]", shrink=0.85, extend="both")
+    plt.show()

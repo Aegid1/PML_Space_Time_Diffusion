@@ -6,8 +6,8 @@ import torch
 from tqdm import tqdm
 from matplotlib import pyplot as plt
 from torch.optim import AdamW
-from Model import Model
-from VP import VP
+from model.Model import Model
+from model.VP import VP
 
 vp = VP()
 SEED = 42
@@ -39,7 +39,7 @@ def diffusion_loss_fn(batch, ts, model):
     return torch.mean(e**2)
 
 
-def load_data(dataset="aldp", transformation=None, n_train=None, n_test=None, root=DATA_DIR):
+def load_data(dataset="aldp", transformation=None, n_train=None, n_test=None, gap=0, root=DATA_DIR):
     """Return lazy training and test generators without shuffling the samples to avoid data leakage."""
     paths = {
         "aldp": "aldp/AImplicitUnconstrained/traj0.h5",
@@ -49,8 +49,8 @@ def load_data(dataset="aldp", transformation=None, n_train=None, n_test=None, ro
     with h5py.File(path, "r") as data:
         n_samples = len(data["coordinates"])
 
-    n_train = int(0.8 * n_samples) if n_train is None else n_train
-    n_test = n_samples - n_train if n_test is None else n_test
+    n_train = int(0.8 * (n_samples - gap)) if n_train is None else n_train
+    n_test = n_samples - n_train - gap if n_test is None else n_test
 
     def generate(start, stop):
         with h5py.File(path, "r") as data:
@@ -66,7 +66,6 @@ def train_loop(data, loss_fn, epochs, BS, model, optimizer, validation_data):
     model.train()
 
     # We use fixed noise levels for validation
-    validation_data = validation_data[:2048] # TODO make sure that validation data contains multiple states and transitions
     validation_rng = torch.Generator().manual_seed(SEED + 1)
     validation_t = torch.rand(len(validation_data), 1, generator=validation_rng) * (1 - 1e-5) + 1e-5
     validation_noise = torch.randn(validation_data.shape, generator=validation_rng)
@@ -103,7 +102,7 @@ if __name__ == "__main__":
     model = Model(dim=2, hidden_dim=92, n_layers=3)
     optimizer = AdamW(model.parameters(), lr=3e-4)
 
-    train_generator, test_generator = load_data("mueller_brown")
+    train_generator, test_generator = load_data("mueller_brown", gap=10_000)
     train_data, test_data = torch.stack(list(train_generator)), torch.stack(list(test_generator))
     print("Training samples:", len(train_data), "| Test samples:", len(test_data))
 

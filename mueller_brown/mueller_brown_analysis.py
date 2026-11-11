@@ -4,7 +4,7 @@ comparison metrics, autocorrelation and the noising of samples with a VP forward
 """
 import torch
 import torch.nn.functional as F
-from mueller_brown_potential import mueller_brown_potential, MB_MINIMA
+from mueller_brown_potential import mueller_brown_potential, MB_MINIMA, MB_STATE_NAMES
 
 
 #############################################
@@ -46,7 +46,7 @@ def boltzmann_probabilities(points, kT):
     return boltzmann_values / torch.sum(boltzmann_values)
 
 
-def compare_to_boltzmann(samples, kT, bins=50, x_range=(-1.5, 1.2), y_range=(-0.5, 2.0)):
+def compare_to_boltzmann_tv_kl(samples, kT, bins=50, x_range=(-1.5, 1.5), y_range=(-0.5, 2.0)):
     """
     Compares the empirical distribution of the simulation samples with the analytic
     Boltzmann distribution on the grid given by X, Y.
@@ -89,7 +89,7 @@ def compare_to_boltzmann(samples, kT, bins=50, x_range=(-1.5, 1.2), y_range=(-0.
     print(f"total variation distance: {tv_dist:.3f} | KL(P || Q): {kl:.3f} | bins: {bins}x{bins}")
 
 
-def boltzmann_state_fractions(kT, minima=MB_MINIMA, x_range=(-2.0, 1.5), y_range=(-1.0, 2.5), n_grid=400):
+def boltzmann_state_fractions(kT, minima=MB_MINIMA, x_range=(-1.5, 1.5), y_range=(-0.5, 2.0), n_grid=400):
     """
     Expected fractions of the metastable states under the Boltzmann distribution, obtained by numerical
     integration on a regular grid. Each grid point is assigned to its nearest minimum, i.e. with the same
@@ -189,3 +189,86 @@ def noised_energy_landscape(samples, alpha, sigma, bins, x_range, y_range, gener
     density = counts / torch.sum(counts)
     energy = -torch.log(density)   # empty bins -> inf
     return energy, x_edges, y_edges
+
+#############################################
+# FREE ENERGY PROFILES
+#############################################
+
+def free_energy_difference(samples, kT, bins, x_range, y_range, max_energy=10.0):
+    """
+    Difference between the relative free energy profile of samples and the true free energy profile U / k_B T on the
+    grid X, Y, in units of k_B T.
+
+    The free energy profile of the samples is estimated from a 2D histogram with one bin per grid point with
+    F_samples = -log p. Both profiles are only defined up to a constant, which is removed by the mean difference
+    over the compared bins. Compared are all bins whose true free energy lies less than max_energy above the
+    minimum and that contain at least one sample, such that all other bins are set to nan.
+
+    Parameters
+    ----------
+    samples : torch.tensor
+        samples of shape (n_samples, 2)
+    kT : float
+        thermal energy k_B T
+    max_energy : float
+        upper limit of the true free energy (relative to its minimum) in units of k_B T for the comparison
+
+    Returns
+    -------
+    difference : torch.tensor
+        F_samples - F_true - offset of shape X.shape, nan outside the compared bins
+    relevant : torch.tensor
+        boolean mask of shape X.shape of all bins below max_energy, including empty ones
+    """
+    counts, (x_edges, y_edges) = torch.histogramdd(samples.detach(), bins=bins, range=[*x_range, *y_range])
+    F_samples = -torch.log(counts / counts.sum())  # empty bins go to inf
+    F_samples = F_samples - F_samples[torch.isfinite(F_samples)].min()  # setting the min at 0 for non-empty bins
+
+    # Mueller-Brown values at the bin centers, so that both profiles lie on the same points
+    x_centers = 0.5 * (x_edges[1:] + x_edges[:-1])
+    y_centers = 0.5 * (y_edges[1:] + y_edges[:-1])
+    X, Y = torch.meshgrid(x_centers, y_centers)
+    F_true = evaluate_on_grid(mueller_brown_potential, X, Y) / kT
+    F_true = F_true - F_true.min() # setting the min to 0
+
+    # mask to only compare bins with relevant energy range and at least one sample
+    relevant = F_true < max_energy
+    compared = relevant & torch.isfinite(F_samples)
+
+    difference = F_samples - F_true
+    difference[~compared] = float("nan")
+    return difference, F_true, X, Y, relevant
+
+
+def free_energy_difference_mae_per_state(difference, X, Y, minima=MB_MINIMA, names=MB_STATE_NAMES):
+    """
+    Mean absolute difference of two free energy profiles for each metastable state, in units of k_B T.
+
+    Each bin is assigned to its nearest minimum, i.e. with the same rule as the samples for the state
+    fractions. Bins without samples (nan in difference) are excluded.
+
+    Parameters
+    ----------
+    difference : torch.tensor
+        difference of the free energy profiles of shape X.shape, nan outside the compared bins
+    X, Y : torch.tensor
+        meshgrid tensors (indexing="ij") of the bin centers
+    minima : torch.tensor
+        positions of the minima of shape (n_states, 2)
+    names : list of str
+        names of the states
+
+    Returns
+    -------
+    dict
+        for each state: "mae" in units of k_B T and "n_bins" (number of compared bins)
+    """
+    states = assign_states(grid_to_points(X, Y), minima).reshape(X.shape)
+    compared = ~torch.isnan(difference)
+
+    results = {}
+    for k, name in enumerate(names):
+        valid = (states == k) & compared
+        results[name] = difference[valid].abs().mean().item() if valid.any() else float("nan")
+
+    return results
